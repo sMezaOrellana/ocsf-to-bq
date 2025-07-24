@@ -139,7 +139,10 @@ def build_dictionary_to_bq(directory_path):
 
     for structure, template in big_query_types_structs.items():
         build_ocsf_attributes_recursive(
-            objects_path, template, big_query_types, big_query_types_structs, objects)
+            objects_path, template,
+            big_query_types, big_query_types_structs,
+            objects, structure
+        )
 
     return objects, big_query_types
 
@@ -147,8 +150,14 @@ def build_dictionary_to_bq(directory_path):
 visited = set()
 
 
-def build_ocsf_attributes_recursive(objects_path, template, big_query_types, big_query_types_structs, objects):
+def build_ocsf_attributes_recursive(objects_path, template, big_query_types, big_query_types_structs, objects, structure):
+    if structure in {"xattributes", "proxy", "unmapped", "proxy_endpoint"}:
+        return ""
+
+    bq_keywords = {"group", "groups", "desc"}
     s = re.findall(r"\{(.*?)\}", template)[0]
+
+    save_struct = structure != s
 
     if s in visited:
         return f"{s}__id STRING"
@@ -158,7 +167,6 @@ def build_ocsf_attributes_recursive(objects_path, template, big_query_types, big
     object_path = objects_path + "/" + s + ".json"
     object_dictionary = robust_open(object_path)
     res = []
-    bq_keywords = {"group", "groups", "desc"}
 
     for t, value in object_dictionary["attributes"].items():
         if t in big_query_types.keys():
@@ -172,11 +180,14 @@ def build_ocsf_attributes_recursive(objects_path, template, big_query_types, big
         elif t == "$include":
             # TODO: handle this include case
             continue
-        elif t == "xattributes":
+        elif t in {"xattributes", "proxy", "unmapped", "proxy_endpoint"}:
             continue
         else:
             r = build_ocsf_attributes_recursive(
-                objects_path, big_query_types_structs[t],  big_query_types, big_query_types_structs, objects)
+                objects_path, big_query_types_structs[t],
+                big_query_types, big_query_types_structs,
+                objects, t
+            )
 
             if t in bq_keywords:
                 x = "__" + t
@@ -194,11 +205,20 @@ def build_ocsf_attributes_recursive(objects_path, template, big_query_types, big
 
         finals = template.format(**{s: final})
         objects[ss] = ss + " " + finals
+        if save_struct:
+            objects[structure] = ss + " " + finals
 
     if s in bq_keywords:
         s = "__" + s
-    final = f"{s} STRUCT<{final}>"
-    objects[s] = final
+    final_x = f"{s} STRUCT<{final}>"
+    objects[s] = final_x
+
+    if save_struct:
+        if structure in bq_keywords:
+            x = "__" + structure
+        else:
+            x = structure
+        objects[structure] = f"{x} STRUCT<{final}>"
 
     return final
 
@@ -221,19 +241,28 @@ def parse_ocsf_events(ocsf_objects, ocsf_types, input_dir):
 
 def parse_ocsf_event(name, path, ocsf_events_bq, ocsf_objects, ocsf_types):
     ocsf_events = robust_open(path)
-    ocsf_events_bq[name] = {}
 
-    if extend_name := ocsf_types.get("extends"):
-        extend = ocsf_objects.get(extend_name)
+    if name not in ocsf_events_bq.keys():
+        ocsf_events_bq[name] = {}
+
+    if extend_name := ocsf_events.get("extends"):
+        extend = ocsf_events_bq.get(extend_name)
         if not extend:
-            extend = parse_ocsf_event(path+"/"+extend_name+".json",)
+            parent_path = str(Path(path).parent)
+            parse_ocsf_event(
+                extend_name, parent_path + "/"+extend_name+".json",
+                ocsf_events_bq, ocsf_objects, ocsf_types)
+            extend = ocsf_events_bq.get(extend_name)
     else:
         extend = {}
+
     for t, v in ocsf_events["attributes"].items():
         if t in ocsf_objects.keys():
             ocsf_events_bq[name][t] = ocsf_objects[t]
         elif t in ocsf_types.keys():
             ocsf_events_bq[name][t] = t + " " + ocsf_types[t]
+        elif t in {"xattributes", "proxy", "unmapped", "proxy_endpoint"}:
+            continue
         elif t in {"$include"}:
             # TODO: handle this include case
             continue
@@ -273,15 +302,6 @@ CREATE OR REPLACE TABLE {dataset_name}.{table_name} (
     print(table_query_string.format(dataset_name=dataset_name,
           table_name=table_name, structure=structure))
 
-
-# if __name__ == "__main__":
-#     args = parse_args()
-#     input_dir = args.ocsf_input_dir
-#     ocsf_objects, ocsf_types = build_dictionary_to_bq(input_dir)
-#
-#     ocsf_events_bq = parse_ocsf_events(ocsf_objects, ocsf_types, input_dir)
-#     create_big_query_table_string(
-#         "process_activity", "oscf_test", ocsf_events_bq)
 
 if __name__ == "__main__":
     args = parse_args()
